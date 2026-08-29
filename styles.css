@@ -1439,6 +1439,10 @@ main { padding-bottom: var(--space-8); }
   margin: 0;
 }
 
+.application-scheduler {
+  margin-top: var(--space-5);
+}
+
 .slot-booking {
   display: grid;
   gap: var(--space-4);

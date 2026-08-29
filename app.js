@@ -691,6 +691,17 @@ const serviceFlowTemplates = {
     ["Appointment, test or visit", "Book a slot only when verification, biometrics, test or document review is required.", ["RTO", "Slot", "Documents to carry"], "Conditional"],
     ["Track application", "Use the application number to track approval, rejection, re-upload requests or dispatch.", ["Application number", "Timeline"], "Track"],
   ]),
+  addVehicleClass: makeFlow([
+    ["Select state", "Start in SARATHI with the state where the existing driving licence belongs.", ["State"], "Required"],
+    ["Open Services on Driving Licence", "Choose addition of class of vehicle from the existing-licence services.", ["DL services", "Service type"], "Required"],
+    ["Fetch licence details", "Enter DL number and date of birth, then confirm the licence holder details returned by the official system.", ["DL number", "Date of birth"], "Required"],
+    ["Choose the new class", "Select the vehicle class to add and review age, training and medical requirements.", ["Vehicle class", "Eligibility"], "Guided"],
+    ["Fill service details", "Complete the endorsement form and add training or medical details where the class requires them.", ["Service form", "Training certificate"], "Guided"],
+    ["Upload documents", "Upload existing licence, identity proof and class-specific certificates.", ["Proofs", "Supporting document"], "Conditional"],
+    ["Pay fee", "Calculate fee, pay, verify payment status and print receipt before the test.", ["Fee", "Receipt"], "Confirm"],
+    ["Book driving test slot", "The last step is a driving competence test at a nearby RTO. Choose centre, date and time.", ["Test centre", "Date", "Slot"], "Required"],
+    ["Attend test and track endorsement", "Carry originals and the correct vehicle class, complete the test, then track the endorsement.", ["Originals", "Vehicle", "Timeline"], "Track"],
+  ]),
   learnerLicence: makeFlow([
     ["Select state", "Start in SARATHI and choose the state where the learner licence application will be processed.", ["State"], "Required"],
     ["Choose New Learner Licence", "Open learner licence services and read eligibility instructions for age and vehicle class.", ["Learner service", "Vehicle class"], "Required"],
@@ -706,8 +717,8 @@ const serviceFlowTemplates = {
     ["Fetch learner licence", "Enter learner licence number and date of birth to bring the record into the application.", ["LL number", "Date of birth"], "Required"],
     ["Complete DL application", "Confirm applicant and vehicle class details after the learner licence has met the minimum holding period.", ["Applicant details", "Vehicle class"], "Guided"],
     ["Upload documents if required", "Upload supporting documents, photo/signature or certificates only when the state flow asks for them.", ["Supporting documents", "Photo/signature"], "Conditional"],
-    ["Book driving test slot", "Choose RTO/centre, date and time for the driving competence test.", ["Test centre", "Date", "Slot"], "Required"],
     ["Pay fee and print receipt", "Pay the official fee and keep acknowledgement and receipt for the RTO visit.", ["Fee", "Acknowledgement", "Receipt"], "Confirm"],
+    ["Book driving test slot", "The last application step is the driving test. Choose a nearby RTO, date and time.", ["Test centre", "Date", "Slot"], "Required"],
     ["Attend test and track dispatch", "Carry originals and the correct vehicle, complete the test, then track licence issue and dispatch.", ["Originals", "Vehicle", "Dispatch"], "Track"],
   ]),
   addressChange: makeFlow([
@@ -816,7 +827,7 @@ const serviceFlowOverrides = {
   "dl-extract": serviceFlowTemplates.sarathiExisting,
   "public-service-badge": serviceFlowTemplates.sarathiExisting,
   "surrender-class": serviceFlowTemplates.sarathiExisting,
-  "add-vehicle-class": serviceFlowTemplates.sarathiExisting,
+  "add-vehicle-class": serviceFlowTemplates.addVehicleClass,
   idp: serviceFlowTemplates.sarathiExisting,
   "change-address": serviceFlowTemplates.addressChange,
   "transfer-ownership": serviceFlowTemplates.vahanRecord,
@@ -825,8 +836,8 @@ const serviceFlowOverrides = {
   "rc-address-change": serviceFlowTemplates.vahanRecord,
   "hypothecation-add": serviceFlowTemplates.vahanRecord,
   "hypothecation-terminate": serviceFlowTemplates.vahanRecord,
-  "fitness-certificate": serviceFlowTemplates.vahanRecord,
-  "duplicate-fitness": serviceFlowTemplates.vahanRecord,
+  "fitness-certificate": serviceFlowTemplates.permitFitness,
+  "duplicate-fitness": serviceFlowTemplates.permitFitness,
   "permit-fitness": serviceFlowTemplates.permitFitness,
   "national-permit": serviceFlowTemplates.permitFitness,
   "fancy-number": serviceFlowTemplates.fancyNumber,
@@ -1048,27 +1059,71 @@ function copilotQuestionsMarkup(step) {
   return step.fields.map((field) => `<li>Please confirm ${field.toLowerCase()}.</li>`).join("");
 }
 
-function needsRtoSlot(step) {
-  const text = `${step.title} ${step.body} ${step.fields.join(" ")}`.toLowerCase();
-  return text.includes("test") || text.includes("appointment") || text.includes("inspection") || text.includes("slot");
+function isSlotBookingStep(step) {
+  const title = step.title.toLowerCase();
+  return title.includes("book driving test")
+    || title.includes("book appointment")
+    || title.includes("book inspection")
+    || title.includes("book or take")
+    || title.includes("appointment, test")
+    || title.includes("appointment or inspection")
+    || title.includes("fee and appointment");
+}
+
+function slotBookingStepIndex(flow) {
+  return flow.findIndex(isSlotBookingStep);
+}
+
+function slotKindForService(service, flow = flowForService(service)) {
+  const step = flow.find(isSlotBookingStep);
+  const text = `${step?.title || ""} ${step?.body || ""} ${service.visit} ${service.summary}`.toLowerCase();
+  if (text.includes("driving test") || text.includes("competence test") || text.includes("learner test") || service.id === "add-vehicle-class") {
+    return {
+      type: "driving-test",
+      required: step?.status === "Required",
+      eyebrow: "Driving test scheduler",
+      title: "Book a driving test slot at a nearby RTO",
+      body: "This is the last application step. Choose a nearby RTO, date and time for the driving test.",
+    };
+  }
+  if (text.includes("inspection")) {
+    return {
+      type: "inspection",
+      required: step?.status === "Required",
+      eyebrow: "Inspection scheduler",
+      title: "Book an inspection slot at a nearby RTO",
+      body: "This service needs a physical inspection. Choose a nearby centre, date and time.",
+    };
+  }
+  return {
+    type: "rto-visit",
+    required: step?.status === "Required",
+    eyebrow: "RTO visit scheduler",
+    title: "Book an RTO visit if this service requires it",
+    body: step?.status === "Required"
+      ? "Choose a nearby RTO, date and time to complete verification."
+      : "Book a nearby RTO slot only when your state needs a test, biometrics or in-person verification.",
+  };
 }
 
 function slotPrepForService(service) {
-  const licenceRelated = service.category === "Driving Licence" || service.id === "permanent-dl" || service.id === "learner-licence";
-  return licenceRelated ? visitPrep.drivingTest : visitPrep.inspection;
+  const kind = slotKindForService(service).type;
+  return kind === "inspection" ? visitPrep.inspection : visitPrep.drivingTest;
 }
 
 function slotBookingMarkup(service, compact = false) {
   const booking = state.bookedSlots[service.id];
   const prep = slotPrepForService(service);
+  const kind = slotKindForService(service);
   return `
     <section class="slot-booking ${compact ? "compact-slot" : ""}">
       <div class="section-title" style="margin:0">
         <div>
-          <span class="eyebrow">Nearby RTO slots</span>
-          <h2>${compact ? "Book this visit" : "Schedule your driving test or RTO visit"}</h2>
+          <span class="eyebrow">${kind.eyebrow}</span>
+          <h2>${kind.title}</h2>
+          ${compact ? "" : `<p class="muted">${kind.body}</p>`}
         </div>
-        ${booking ? `<span class="status good">Booked</span>` : `<span class="status info">Slots available</span>`}
+        ${booking ? `<span class="status good">Booked</span>` : `<span class="status ${kind.required ? "warn" : "info"}">${kind.required ? "Required" : "If required"}</span>`}
       </div>
       <div class="slot-grid">
         ${rtos.map((rto) => `<article class="slot-rto ${booking?.rto === rto.name ? "selected" : ""}">
@@ -1162,7 +1217,7 @@ function currentStepFormMarkup(service, flow, currentIndex) {
         <button class="btn secondary" data-copilot-fill="${service.id}">Ask assistant to fill this step</button>
         ${state.copilotDrafts[service.id] ? `<span class="success-state compact-state">Draft prepared. Please review and edit anything that looks wrong.</span>` : ""}
       </div>
-      ${needsRtoSlot(currentStep) ? slotBookingMarkup(service, true) : ""}
+      ${isSlotBookingStep(currentStep) ? slotBookingMarkup(service, true) : ""}
       <div class="info-banner compact-banner">
         <strong>Why this step?</strong>
         <span>${currentStep.status === "Conditional" ? "This appears only when the selected state or service requires it." : "These details match the selected service before the platform asks for the next information."}</span>
@@ -1690,6 +1745,8 @@ function flowPage(id) {
   const service = services.find((x) => x.id === id) || services[0];
   const flow = flowForService(service);
   const currentIndex = Math.min(state.flowProgress[service.id] || 0, flow.length - 1);
+  const bookingIndex = slotBookingStepIndex(flow);
+  const showScheduler = bookingIndex >= 0 && currentIndex >= bookingIndex;
   return shell(`
     <section class="section content-page">
       <div class="page-header">
@@ -1720,6 +1777,8 @@ function flowPage(id) {
         </article>
         ${applicationPreviewMarkup(service, flow, currentIndex)}
       </section>
+
+      ${showScheduler ? `<section class="card simple-panel application-scheduler">${slotBookingMarkup(service)}</section>` : ""}
 
       <section class="quiet-section">
         <div class="section-title"><div><span class="eyebrow">Edge cases</span><h2>Handled in the flow</h2></div></div>
